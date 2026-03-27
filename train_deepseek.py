@@ -56,12 +56,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-layers", type=int, default=4)
     parser.add_argument("--n-heads", type=int, default=4)
+    parser.add_argument("--n-kv-heads", type=int, default=2)
+    parser.add_argument("--attention-type", type=str, default="mla", choices=["mha", "mqa", "gqa", "mla"])
     parser.add_argument("--kv-latent-dim", type=int, default=64)
     parser.add_argument("--moe-num-experts", type=int, default=4)
     parser.add_argument("--moe-hidden-mult", type=int, default=4)
+    parser.add_argument("--mttp-steps", type=int, default=0, help="Number of future-token heads for MTTP.")
+    parser.add_argument("--mttp-coeff", type=float, default=0.25, help="Loss weight for MTTP auxiliary objective.")
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--adam-decay", type=float, default=0.0)
     parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
 
 
@@ -78,6 +83,9 @@ def resolve_device(name: str) -> torch.device:
 def main() -> None:
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     device = resolve_device(args.device)
 
     text = load_text(args.text_path)
@@ -87,10 +95,14 @@ def main() -> None:
         block_size=args.block_size,
         d_model=args.d_model,
         n_heads=args.n_heads,
+        n_kv_heads=args.n_kv_heads,
         n_layers=args.n_layers,
+        attention_type=args.attention_type,
         kv_latent_dim=args.kv_latent_dim,
         moe_num_experts=args.moe_num_experts,
         moe_hidden_mult=args.moe_hidden_mult,
+        mttp_steps=args.mttp_steps,
+        mttp_coeff=args.mttp_coeff,
         dropout=args.dropout,
     )
     model = NotebookDeepSeekLM(cfg).to(device)

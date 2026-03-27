@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 from torch import nn
@@ -46,6 +46,7 @@ class TransformerBlock(nn.Module):
             n_kv_heads=cfg.n_kv_heads,
             kv_latent_dim=cfg.kv_latent_dim,
             dropout=cfg.dropout,
+            max_cache_len=cfg.block_size,
         )
         self.use_moe = cfg.use_moe and (layer_idx % max(cfg.moe_every, 1) == 0)
         if self.use_moe:
@@ -62,8 +63,14 @@ class TransformerBlock(nn.Module):
                 dropout=cfg.dropout,
             )
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        x = x + self.attn(self.norm1(x))
+    def forward(
+        self,
+        x: torch.Tensor,
+        kv_cache: Optional[Dict[str, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Dict[str, torch.Tensor]]]:
+        attn_out, next_cache = self.attn(self.norm1(x), kv_cache=kv_cache, use_cache=use_cache)
+        x = x + attn_out
         ff_in = self.norm2(x)
         if self.use_moe:
             ff_out, aux_loss = self.ff(ff_in)
@@ -71,4 +78,4 @@ class TransformerBlock(nn.Module):
             ff_out = self.ff(ff_in)
             aux_loss = torch.zeros((), device=x.device, dtype=x.dtype)
         x = x + ff_out
-        return x, aux_loss
+        return x, aux_loss, next_cache

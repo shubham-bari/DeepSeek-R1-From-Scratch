@@ -14,11 +14,15 @@ class NotebookConfig:
     block_size: int = 128
     d_model: int = 128
     n_heads: int = 4
+    n_kv_heads: int = 2
     n_layers: int = 4
+    attention_type: str = "mla"  # mha | mqa | gqa | mla
     kv_latent_dim: int = 64
     moe_hidden_mult: int = 4
     moe_num_experts: int = 4
     dropout: float = 0.1
+    mttp_steps: int = 0
+    mttp_coeff: float = 0.25
 
 
 def apply_rope(x: torch.Tensor) -> torch.Tensor:
@@ -38,6 +42,94 @@ def apply_rope(x: torch.Tensor) -> torch.Tensor:
     x1 = x[..., :half]
     x2 = x[..., half:]
     return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+
+
+def _causal_mask(q_len: int, kv_len: int, device: torch.device) -> torch.Tensor:
+    return torch.triu(torch.ones(q_len, kv_len, device=device, dtype=torch.bool), diagonal=1)
+
+
+class MHAAttention(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float) -> None:
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, d_model, bias=False)
+        self.v_proj = nn.Linear(d_model, d_model, bias=False)
+        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, t, _ = x.shape
+        q = self.q_proj(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        q = apply_rope(q)
+        k = apply_rope(k)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(_causal_mask(t, t, x.device), float("-inf"))
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, t, self.d_model)
+        return self.o_proj(out)
+
+
+class MQAAttention(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, dropout: float) -> None:
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, self.head_dim, bias=False)
+        self.v_proj = nn.Linear(d_model, self.head_dim, bias=False)
+        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, t, _ = x.shape
+        q = self.q_proj(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        k = apply_rope(self.k_proj(x).unsqueeze(1).expand(-1, self.n_heads, -1, -1))
+        v = self.v_proj(x).unsqueeze(1).expand(-1, self.n_heads, -1, -1)
+        q = apply_rope(q)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(_causal_mask(t, t, x.device), float("-inf"))
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, t, self.d_model)
+        return self.o_proj(out)
+
+
+class GQAAttention(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, n_kv_heads: int, dropout: float) -> None:
+        super().__init__()
+        assert d_model % n_heads == 0, "d_model must be divisible by n_heads"
+        assert n_heads % n_kv_heads == 0, "n_heads must be divisible by n_kv_heads"
+        self.d_model = d_model
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.group_size = n_heads // n_kv_heads
+        self.head_dim = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b, t, _ = x.shape
+        q = self.q_proj(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        k = apply_rope(k).repeat_interleave(self.group_size, dim=1)
+        v = v.repeat_interleave(self.group_size, dim=1)
+        q = apply_rope(q)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
+        scores = scores.masked_fill(_causal_mask(t, t, x.device), float("-inf"))
+        attn = self.dropout(torch.softmax(scores, dim=-1))
+        out = torch.matmul(attn, v).transpose(1, 2).contiguous().view(b, t, self.d_model)
+        return self.o_proj(out)
 
 
 class MLAFromNotebook(nn.Module):
@@ -70,13 +162,36 @@ class MLAFromNotebook(nn.Module):
         k = apply_rope(k)
 
         attn_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.head_dim)
-        mask = torch.triu(torch.ones(t, t, device=x.device, dtype=torch.bool), diagonal=1)
+        mask = _causal_mask(t, t, x.device)
         attn_scores = attn_scores.masked_fill(mask, float("-inf"))
         attn_weights = torch.softmax(attn_scores, dim=-1)
         attn_weights = self.dropout(attn_weights)
 
         out = torch.matmul(attn_weights, v).transpose(1, 2).contiguous().view(b, t, self.d_model)
         return self.W_o(out)
+
+
+def build_attention_from_config(cfg: NotebookConfig) -> nn.Module:
+    kind = cfg.attention_type.lower()
+    if kind == "mha":
+        return MHAAttention(d_model=cfg.d_model, n_heads=cfg.n_heads, dropout=cfg.dropout)
+    if kind == "mqa":
+        return MQAAttention(d_model=cfg.d_model, n_heads=cfg.n_heads, dropout=cfg.dropout)
+    if kind == "gqa":
+        return GQAAttention(
+            d_model=cfg.d_model,
+            n_heads=cfg.n_heads,
+            n_kv_heads=max(1, cfg.n_kv_heads),
+            dropout=cfg.dropout,
+        )
+    if kind == "mla":
+        return MLAFromNotebook(
+            d_model=cfg.d_model,
+            n_heads=cfg.n_heads,
+            kv_latent_dim=cfg.kv_latent_dim,
+            dropout=cfg.dropout,
+        )
+    raise ValueError(f"Unsupported attention_type={cfg.attention_type}")
 
 
 class SimpleExpert(nn.Module):
@@ -126,12 +241,7 @@ class NotebookTransformerBlock(nn.Module):
         super().__init__()
         self.norm1 = RMSNorm(cfg.d_model)
         self.norm2 = RMSNorm(cfg.d_model)
-        self.attn = MLAFromNotebook(
-            d_model=cfg.d_model,
-            n_heads=cfg.n_heads,
-            kv_latent_dim=cfg.kv_latent_dim,
-            dropout=cfg.dropout,
-        )
+        self.attn = build_attention_from_config(cfg)
         self.moe = SimpleMoEFromNotebook(
             d_model=cfg.d_model,
             d_hidden=cfg.d_model * cfg.moe_hidden_mult,
@@ -175,7 +285,23 @@ class NotebookDeepSeekLM(nn.Module):
         logits = self.lm_head(x)
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            lm_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            mttp_loss_terms = []
+            for offset in range(1, max(self.cfg.mttp_steps, 0) + 1):
+                if t <= offset:
+                    continue
+                mttp_logits = logits[:, :-offset, :]
+                mttp_targets = targets[:, offset:]
+                mttp_term = F.cross_entropy(
+                    mttp_logits.reshape(-1, mttp_logits.size(-1)),
+                    mttp_targets.reshape(-1),
+                )
+                mttp_loss_terms.append(mttp_term)
+            if mttp_loss_terms:
+                mttp_loss = torch.stack(mttp_loss_terms).mean()
+                loss = lm_loss + self.cfg.mttp_coeff * mttp_loss
+            else:
+                loss = lm_loss
         return logits, loss
 
     @torch.no_grad()

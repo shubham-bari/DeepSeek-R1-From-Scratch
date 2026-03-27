@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn.functional as F
@@ -35,19 +35,40 @@ class DeepSeekLM(nn.Module):
         idx: torch.Tensor,
         targets: Optional[torch.Tensor] = None,
         moe_aux_coeff: float = 1e-2,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, float]]:
+        past_kv: Optional[List[Optional[Dict[str, torch.Tensor]]]] = None,
+        use_cache: bool = False,
+    ) -> Union[
+        Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, float]],
+        Tuple[torch.Tensor, Optional[torch.Tensor], Dict[str, float], List[Optional[Dict[str, torch.Tensor]]]],
+    ]:
         b, t = idx.shape
         if t > self.cfg.block_size:
             raise ValueError(f"Input sequence length {t} exceeds block size {self.cfg.block_size}")
 
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device).unsqueeze(0)
+        if past_kv is not None and len(past_kv) != self.cfg.n_layers:
+            raise ValueError(f"past_kv should have {self.cfg.n_layers} entries, got {len(past_kv)}")
+        past_len = 0
+        if past_kv is not None and past_kv and past_kv[0]:
+            first = past_kv[0]
+            if first is not None:
+                if "k" in first:
+                    past_len = int(first["k"].size(-2))
+                elif "latent" in first:
+                    past_len = int(first["latent"].size(1))
+        pos_ids = torch.arange(past_len, past_len + t, dtype=torch.long, device=idx.device)
+        pos_shift = max(0, int(pos_ids[-1].item()) - self.cfg.block_size + 1)
+        pos = (pos_ids - pos_shift).unsqueeze(0)
         x = self.tok_emb(idx) + self.pos_emb(pos)
         x = self.drop(x)
 
         aux_loss_total = torch.zeros((), device=idx.device, dtype=x.dtype)
-        for block in self.blocks:
-            x, aux_loss = block(x)
+        next_kv: List[Optional[Dict[str, torch.Tensor]]] = []
+        for i, block in enumerate(self.blocks):
+            block_cache = past_kv[i] if past_kv is not None else None
+            x, aux_loss, block_next_cache = block(x, kv_cache=block_cache, use_cache=use_cache)
             aux_loss_total = aux_loss_total + aux_loss
+            if use_cache:
+                next_kv.append(block_next_cache)
 
         x = self.norm(x)
         logits = self.lm_head(x)
@@ -56,15 +77,18 @@ class DeepSeekLM(nn.Module):
             lm_loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
             loss = lm_loss + moe_aux_coeff * aux_loss_total
         stats = {"moe_aux_loss": float(aux_loss_total.detach().item())}
+        if use_cache:
+            return logits, loss, stats, next_kv
         return logits, loss, stats
 
     @torch.no_grad()
     def generate(self, idx: torch.Tensor, max_new_tokens: int, temperature: float = 1.0) -> torch.Tensor:
+        idx_cond = idx[:, -self.cfg.block_size :]
+        logits, _, _, past_kv = self(idx_cond, use_cache=True)
         for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.cfg.block_size :]
-            logits, _, _ = self(idx_cond)
             logits = logits[:, -1, :] / max(temperature, 1e-5)
             probs = torch.softmax(logits, dim=-1)
             next_idx = torch.multinomial(probs, num_samples=1)
             idx = torch.cat([idx, next_idx], dim=1)
+            logits, _, _, past_kv = self(next_idx, use_cache=True, past_kv=past_kv)
         return idx

@@ -1,37 +1,29 @@
-# DeepSeek-Style LLM From Scratch (Notebook Components)
+# DeepSeek-Style LLM From Scratch
 
-Build a modular language model from your own notebook implementations:
-- `MLA` (Multi-Head Latent Attention)
-- `MoE` (Mixture of Experts, top-1 routing)
-- custom `Adam` optimizer API (`pre_update_params` / `update_params` / `post_update_params`)
-- `RoPE` rotary positional encoding
+This repo now includes two pipelines:
+- `notebook_components.py` stack (MTTP experiments and legacy plots)
+- `deepseek_llm/` stack (core model with **real KV cache** for attention/generation)
 
-No DeepSeek package import is used in the training/benchmark pipeline.
+## Major Updates
 
-## What This Project Does
+- Added real KV-cache support to the core model (`deepseek_llm/`):
+  - `DeepSeekLM.forward(..., past_kv=..., use_cache=True)`
+  - cache-aware incremental generation in `DeepSeekLM.generate()`
+- Split attention mechanisms into separate files:
+  - `deepseek_llm/modules/attention_mha.py`
+  - `deepseek_llm/modules/attention_mqa.py`
+  - `deepseek_llm/modules/attention_gqa.py`
+  - `deepseek_llm/modules/attention_mla.py`
+  - shared cache/mask helpers in `deepseek_llm/modules/attention_common.py`
+- Added research dataset prep:
+  - `prepare_wikitext2.py` downloads **WikiText-2** and creates a small CPU-friendly subset
+- Added new core efficiency benchmark + plots:
+  - `benchmark_deepseek_efficiency.py`
+  - `make_efficiency_plots.py`
+- Ran and re-ran longer MLA training schedules:
+  - `1000` steps on WikiText-2 small subset, with curated results in `assets/results/train_mla_1000_v2/metrics.json`
 
-- converts notebook ideas into clean, reusable Python modules
-- trains a compact character-level language model end-to-end
-- benchmarks multiple MLA+MoE configurations for speed, memory, and quality
-- auto-generates a large plot suite for experiment analysis
-
-Core files:
-- `notebook_components.py` - notebook-based MLA, MoE, Adam, RoPE model stack
-- `train_deepseek.py` - training script
-- `benchmark_experiments.py` - controlled benchmark experiments
-- `make_plots.py` - generates 15 analysis plots from JSON results
-
-## Real Dataset Used
-
-- **Tiny Shakespeare** (`data/tiny_shakespeare.txt`)
-- Source: Karpathy char-rnn public dataset
-- Size used: ~1.11M characters, 65 unique chars
-
-This is small enough to run quickly on a laptop, but still realistic enough for reproducible LLM training/benchmark comparisons.
-
-## Reproducible Commands
-
-Setup:
+## Quick Setup
 
 ```bash
 python3 -m venv .venv
@@ -39,96 +31,113 @@ python3 -m venv .venv
 .venv/bin/python -m pip install torch numpy matplotlib
 ```
 
-Download dataset:
+## Research Dataset (Small + CPU Efficient)
+
+WikiText-2 (used broadly in language modeling research):
 
 ```bash
-mkdir -p data
-curl -L "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt" -o data/tiny_shakespeare.txt
+.venv/bin/python prepare_wikitext2.py \
+  --out-dir data \
+  --max-train-chars 320000 \
+  --max-valid-chars 60000 \
+  --max-test-chars 60000
 ```
 
-Train:
+Generated file used for training/benchmarks:
+- `data/wikitext2_small_all.txt`
+
+## MLA-Only Training Run (1000 steps)
 
 ```bash
 .venv/bin/python train_deepseek.py \
-  --text-path data/tiny_shakespeare.txt \
-  --steps 250 \
-  --eval-interval 50 \
-  --eval-iters 30 \
-  --batch-size 32 \
-  --block-size 128 \
-  --d-model 192 \
-  --n-layers 4 \
-  --n-heads 6 \
+  --text-path data/wikitext2_small_all.txt \
+  --steps 1000 \
+  --eval-interval 100 \
+  --eval-iters 20 \
+  --batch-size 16 \
+  --block-size 96 \
+  --d-model 128 \
+  --n-layers 3 \
+  --n-heads 4 \
+  --n-kv-heads 2 \
+  --attention-type mla \
   --kv-latent-dim 64 \
   --moe-num-experts 4 \
-  --out-dir runs/tinyshakespeare_run
+  --mttp-steps 1 \
+  --mttp-coeff 0.05 \
+  --out-dir assets/results/train_mla_1000_v2
 ```
 
-Benchmark:
+Selected metrics from `assets/results/train_mla_1000_v2/metrics.json`:
+- Initial val loss: `4.7528` (step 1)
+- **Best val loss: `2.6653` at step 800**
+- Final val loss: `2.6853` (step 1000)
+- Improvement from step 1 to best step: `2.0875` loss points (`43.92%`)
+- Peak throughput: `41422.0` tokens/sec
+- Avg throughput over last 4 evals: `41363.1` tokens/sec
+
+## Core Efficiency Benchmark (KV Cache + Attention Types)
 
 ```bash
-.venv/bin/python benchmark_experiments.py \
-  --text-path data/tiny_shakespeare.txt \
-  --steps 70 \
-  --batch-size 24 \
-  --block-size 128 \
-  --output runs/tinyshakespeare_benchmark.json
+.venv/bin/python benchmark_deepseek_efficiency.py \
+  --text-path data/wikitext2_small_all.txt \
+  --steps 180 \
+  --batch-size 16 \
+  --block-size 96 \
+  --output assets/results/deepseek_efficiency.json
 ```
-
-Generate plots:
 
 ```bash
 MPLCONFIGDIR="$PWD/.mplconfig" MPLBACKEND=Agg \
-.venv/bin/python make_plots.py \
-  --metrics runs/tinyshakespeare_run/metrics.json \
-  --benchmark runs/tinyshakespeare_benchmark.json \
-  --out-dir runs/plots_tinyshakespeare
+.venv/bin/python make_efficiency_plots.py \
+  --benchmark assets/results/deepseek_efficiency.json \
+  --out-dir assets/plots_efficiency
 ```
 
-## Results (Tiny Shakespeare)
+## Efficiency Snapshot (Core DeepSeekLM)
 
-### Training progression
+From `assets/results/deepseek_efficiency.json`:
 
-From `runs/tinyshakespeare_run/metrics.json`:
-- Step 1: train `3.7967`, val `3.7981`
-- Step 50: train `2.6320`, val `2.6459`
-- Step 100: train `2.5421`, val `2.5532`
-- Step 150: train `2.5164`, val `2.5365`
-- Step 200: train `2.4958`, val `2.5064`
-- Step 250: train `2.4245`, val `2.4374`
+| Variant | Val loss | Train tok/s | Decode tok/s (no cache) | Decode tok/s (cache) | Cache speedup | Runtime KV cache (MB) |
+|---|---:|---:|---:|---:|---:|---:|
+| `mha` | 2.5093 | 48977.2 | 531.5 | 2113.0 | 3.98x | 0.2813 |
+| `mqa` | 2.5211 | **50418.0** | 527.4 | **2167.9** | 4.11x | 0.0703 |
+| `gqa` | **2.4889** | 47687.1 | 488.5 | 2011.1 | 4.12x | 0.1406 |
+| `mla` | 2.5027 | 45976.6 | 518.3 | 2051.5 | 3.96x | 0.0703 |
+| `mla_lat32` | 2.5064 | 47480.8 | 477.4 | 2139.2 | **4.48x** | **0.0352** |
 
-Throughput rises to ~`19.8k tokens/sec` during this run.
+Takeaways:
+- KV cache gives ~`4x` decode speedup across variants.
+- `MLA` with lower latent (`mla_lat32`) has the smallest cache footprint.
+- `GQA` is best on loss in this run, while `MQA` is best on throughput.
 
-### Benchmark comparison
+## Plots
 
-From `runs/tinyshakespeare_benchmark.json`:
+### Selected best plots (recommended)
 
-| Variant | Val Loss | PPL Proxy | Tokens/sec | Peak Mem (MB) | Est KV Cache (MB) |
-|---|---:|---:|---:|---:|---:|
-| `mla_lat32_exp4` | 2.7112 | 15.05 | **56319.8** | 6.59 | **2.25** |
-| `mla_lat64_exp4` | **2.7128** | **15.07** | 55919.6 | 6.73 | 4.50 |
-| `mla_lat64_exp8` | 2.7212 | 15.20 | 48841.0 | 12.76 | 4.50 |
-| `mla_lat96_exp8` | 2.7153 | 15.11 | 47257.8 | 12.90 | 6.75 |
+These are the most informative figures from the current run set.
 
-Practical pick in this run:
-- **Best speed/memory efficiency**: `mla_lat32_exp4`
-- **Best quality among tested variants (very close overall)**: `mla_lat32_exp4`
+![MLA 1000-step Training Loss Curves](assets/plots_mla_1000_v2/01_training_loss_curves.png)
+![MLA Training Throughput](assets/plots_mla_1000_v2/03_training_throughput.png)
+![Decode Cache Speedup](assets/plots_efficiency/03_eff_decode_cache_speedup.png)
+![Runtime KV Cache MB](assets/plots_efficiency/04_eff_runtime_kv_cache_mb.png)
+![Composite Efficiency Score](assets/plots_efficiency/09_eff_composite_score.png)
 
-## Why These Results Happen
+### Full core efficiency plots
 
-- Lower `kv_latent_dim` reduces latent KV representation size, so memory and cache pressure drop, improving throughput.
-- More experts (`exp8`) increase parameter count and routing overhead, which raises memory and lowers speed on this scale.
-- Quality differences are modest because all variants were trained for short benchmark schedules; longer training usually separates them more clearly.
-- RoPE helps position-aware attention without adding learned positional embedding parameters.
+![Decode Cache Speedup](assets/plots_efficiency/03_eff_decode_cache_speedup.png)
+![Runtime KV Cache MB](assets/plots_efficiency/04_eff_runtime_kv_cache_mb.png)
+![Decode Throughput Cached vs Uncached](assets/plots_efficiency/07_eff_decode_cached_vs_uncached.png)
+![Quality vs Cached Decode Speed](assets/plots_efficiency/08_eff_quality_vs_cached_decode_scatter.png)
+![Composite Efficiency Score](assets/plots_efficiency/09_eff_composite_score.png)
 
-## Plot Outputs
+### Full MLA + MTTP/attention notebook plots (existing pipeline)
 
-`make_plots.py` generates 15 plots per run (loss curves, throughput trends, memory bars, tradeoff scatters, efficiency ranking, composite ranking).  
-Current generated set: `runs/plots_tinyshakespeare/`.
+![MTTP Future Loss Comparison](assets/plots/18_mttp_future_loss_h2_comparison.png)
+![Attention Throughput](assets/plots/09_attention_tps_bar.png)
+![Attention KV Cache](assets/plots/11_attention_kv_cache_bar.png)
 
-## Roadmap
+## Notes
 
-- Add longer-run benchmark presets (e.g., 1k+ steps)
-- Add token-level datasets (WikiText-2, OpenWebText subset)
-- Add validation text generation metrics and qualitative samples table
-- Add optional FlashAttention and mixed precision modes
+- `runs/` is gitignored; tracked results/plots are saved under `assets/`.
+- For stronger claims, average across multiple seeds (recommended next step).

@@ -1,0 +1,102 @@
+{
+  "metadata": {
+    "steps": 25,
+    "batch_size": 20,
+    "block_size": 96,
+    "device": "cpu"
+  },
+  "attention_benchmark": [
+    {
+      "variant": "mha_ref",
+      "attention_type": "mha",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 2,
+      "moe_num_experts": 4,
+      "mttp_steps": 0,
+      "mttp_coeff": 0.25,
+      "val_loss": 1.9773074626922607,
+      "future_loss_h2": 3.681612229347229,
+      "perplexity_proxy": 7.223267555236816,
+      "tokens_per_sec": 53183.267879624065,
+      "peak_mem_mb": 6.8061981201171875,
+      "estimated_kv_cache_mb": 5.625
+    },
+    {
+      "variant": "mqa_ref",
+      "attention_type": "mqa",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 1,
+      "moe_num_experts": 4,
+      "mttp_steps": 0,
+      "mttp_coeff": 0.25,
+      "val_loss": 1.9560917735099792,
+      "future_loss_h2": 3.734829568862915,
+      "perplexity_proxy": 7.0716352462768555,
+      "tokens_per_sec": 55493.74592751009,
+      "peak_mem_mb": 6.5249481201171875,
+      "estimated_kv_cache_mb": 1.40625
+    },
+    {
+      "variant": "gqa_ref",
+      "attention_type": "gqa",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 2,
+      "moe_num_experts": 4,
+      "mttp_steps": 0,
+      "mttp_coeff": 0.25,
+      "val_loss": 1.9624756217002868,
+      "future_loss_h2": 3.7578222274780275,
+      "perplexity_proxy": 7.116924285888672,
+      "tokens_per_sec": 54535.06654482378,
+      "peak_mem_mb": 6.6186981201171875,
+      "estimated_kv_cache_mb": 2.8125
+    },
+    {
+      "variant": "mla_ref",
+      "attention_type": "mla",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 2,
+      "moe_num_experts": 4,
+      "mttp_steps": 0,
+      "mttp_coeff": 0.25,
+      "val_loss": 2.0255204319953917,
+      "future_loss_h2": 3.668074917793274,
+      "perplexity_proxy": 7.580053806304932,
+      "tokens_per_sec": 53887.97283890192,
+      "peak_mem_mb": 6.7139129638671875,
+      "estimated_kv_cache_mb": 2.8125
+    }
+  ],
+  "mttp_benchmark": [
+    {
+      "variant": "mla_mttp0",
+      "attention_type": "mla",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 2,
+      "moe_num_experts": 4,
+      "mttp_steps": 0,
+      "mttp_coeff": 0.25,
+      "val_loss": 1.9712835669517517,
+      "future_loss_h2": 3.7359326601028444,
+      "perplexity_proxy": 7.179886341094971,
+      "tokens_per_sec": 43075.75392383433,
+      "peak_mem_mb": 6.7139129638671875,
+      "estimated_kv_cache_mb": 2.8125
+    },
+    {
+      "variant": "mla_mttp1",
+      "attention_type": "mla",
+      "kv_latent_dim": 64,
+      "n_kv_heads": 2,
+      "moe_num_experts": 4,
+      "mttp_steps": 1,
+      "mttp_coeff": 0.05,
+      "val_loss": 2.1685003995895387,
+      "future_loss_h2": 3.667671966552734,
+      "perplexity_proxy": 8.745160102844238,
+      "tokens_per_sec": 43669.577327609535,
+      "peak_mem_mb": 6.7139129638671875,
+      "estimated_kv_cache_mb": 2.8125
+    }
+  ]
+}
