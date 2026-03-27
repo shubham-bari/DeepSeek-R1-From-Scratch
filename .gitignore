@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+.mplconfig/
+runs/
+benchmark_results.json
